@@ -1,0 +1,1548 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<!--
+  Politique de sécurité de contenu. Elle est volontairement restrictive et
+  constitue la garantie la plus simple à vérifier lors d'un audit :
+  - connect-src 'none' interdit toute requête sortante, donc toute
+    exfiltration de données, quel que soit le code de la page ;
+  - form-action 'none' interdit l'envoi de tout formulaire ;
+  - default-src 'none' interdit tout chargement de ressource externe, à
+    l'exception explicite du script de l'API Grist, nécessaire pour dialoguer
+    avec le document hôte ;
+  - img-src data: autorise seulement des images embarquées dans la page.
+  Le widget ne charge ni police, ni feuille de style, ni bibliothèque distante.
+-->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'unsafe-inline' https://docs.getgrist.com; style-src 'unsafe-inline'; img-src data:; connect-src 'none'; form-action 'none'; base-uri 'none'">
+<title>Tuiles de navigation</title>
+<script>
+  // L'API Grist n'est chargée que si la page est affichée dans un cadre, ce
+  // qui est le cas dans Grist. Ouverte directement dans un navigateur, la page
+  // ne déclenche alors aucune requête réseau.
+  // index.html?demo=1 charge à la place un simulateur local (mock-grist.js),
+  // pour éprouver le mode Grist sans document réel.
+  (function () {
+    var demo = /(?:^|[?&])demo=1(?:&|$)/.test(location.search);
+    if (demo) {
+      document.write('<script src="mock-grist.js"><\/script>');
+    } else if (window.self !== window.top) {
+      document.write('<script src="https://docs.getgrist.com/grist-plugin-api.js"><\/script>');
+    }
+  })();
+</script>
+<style>
+  :root {
+    /* Sans color-scheme: light, un champ ou un bouton au fond blanc explicite
+       mais sans couleur de texte explicite s'affiche en blanc sur blanc quand
+       le navigateur est en thème sombre. */
+    color-scheme: light;
+    --bordure: #d7dde5;
+    --texte: #16202b;
+    --texte-doux: #5b6472;
+    --fond: #f4f6f8;
+
+    /* Pilotées par la taille choisie, voir appliquerTaille. */
+    --tuile-min: 150px;
+    --picto: 30px;
+    --nom: 14px;
+    --detail: 12.5px;
+    --pad-tuile: 10px 12px 13px;
+    --gap: 10px;
+    --hauteur-tuile: auto;
+    --colonne: 330px;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    padding: 0;
+    min-height: 100%;
+    font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    color: var(--texte);
+    background: var(--fond);
+    font-size: 14px;
+  }
+  [hidden] { display: none !important; }
+
+  /* Barre d'outils en position statique : une barre collante dans un panneau
+     de widget étroit a déjà rendu du texte illisible hors survol. */
+  #barre {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+    padding: 8px 12px;
+    background: #ffffff;
+    border-bottom: 1px solid var(--bordure);
+  }
+  #barre .espace { flex: 1 1 auto; }
+
+  input[type="text"], input[type="search"], textarea, select {
+    font-family: inherit;
+    font-size: 13px;
+    padding: 5px 8px;
+    border-radius: 6px;
+    border: 1px solid #94a3b8;
+    background: #ffffff;
+    color: var(--texte);
+  }
+  input::placeholder, textarea::placeholder { color: #7c8797; }
+  button {
+    font-family: inherit;
+    font-size: 13px;
+    padding: 5px 10px;
+    border-radius: 6px;
+    border: 1px solid #94a3b8;
+    background: #ffffff;
+    color: var(--texte);
+    cursor: pointer;
+  }
+  button:hover { background: #eef2f6; }
+  button.principal {
+    background: #16202b;
+    color: #ffffff;
+    border-color: #16202b;
+  }
+  button.principal:hover { background: #2b3a4d; }
+  button.danger { color: #7a1f1f; border-color: #c08a8a; }
+  button.danger:hover { background: #fbeeee; }
+  button:disabled { opacity: 1; color: #7c8797; border-color: #cbd3dd; cursor: default; }
+
+  #recherche { flex: 1 1 160px; min-width: 110px; max-width: 320px; }
+
+  #filtres { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 12px 0; }
+  .puce {
+    font-size: 12px;
+    font-weight: 700;
+    padding: 3px 10px;
+    border-radius: 999px;
+    border: 1px solid transparent;
+    cursor: pointer;
+    white-space: normal;
+    overflow-wrap: break-word;
+  }
+  .puce[aria-pressed="false"] { opacity: 1; background: #ffffff; color: var(--texte-doux); border-color: var(--bordure); }
+
+  #compteur { font-size: 12.5px; color: var(--texte-doux); white-space: normal; overflow-wrap: break-word; }
+
+  /* Bandeaux : contraste solide, texte qui passe à la ligne, jamais rogné,
+     jamais dépendant du survol. */
+  #bandeaux { display: flex; flex-direction: column; gap: 8px; }
+  #bandeaux:not(:empty) { padding: 10px 12px 0; }
+  .bandeau {
+    padding: 10px 12px;
+    border-radius: 6px;
+    font-size: 13px;
+    font-weight: 600;
+    line-height: 1.45;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+  .bandeau-erreur { background: #7a1f1f; color: #ffffff; }
+  .bandeau-avert { background: #7a4a12; color: #ffffff; }
+  .bandeau-info { background: #14506b; color: #ffffff; }
+
+  /* ---------------------------------------------------------------- vue */
+
+  #vue { padding: 12px; }
+  #zones { column-width: var(--colonne); column-gap: var(--gap); }
+  .zone {
+    break-inside: avoid;
+    -webkit-column-break-inside: avoid;
+    margin: 0 0 var(--gap);
+    padding: 10px;
+    border-radius: 10px;
+    border: 1px solid var(--bordure);
+  }
+  .zone-titre {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 0 0 8px;
+    font-size: 13px;
+    font-weight: 800;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+    white-space: normal;
+    overflow-wrap: break-word;
+  }
+  .zone-nombre { font-weight: 600; opacity: 1; }
+
+  .grille {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(var(--tuile-min), 1fr));
+    gap: var(--gap);
+    align-items: stretch;
+  }
+
+  .tuile {
+    min-height: var(--hauteur-tuile);
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    padding: var(--pad-tuile);
+    background: #ffffff;
+    border: 1px solid var(--bordure);
+    border-top-width: 3px;
+    border-radius: 10px;
+    text-align: center;
+    text-decoration: none;
+    color: inherit;
+    cursor: pointer;
+    box-shadow: 0 1px 2px rgba(15, 23, 42, 0.06);
+    transition: border-color 0.12s, box-shadow 0.12s, transform 0.12s;
+  }
+  .tuile:hover, .tuile:focus-visible {
+    box-shadow: 0 4px 10px rgba(15, 23, 42, 0.14);
+    transform: translateY(-1px);
+    outline: none;
+  }
+  .tuile:focus-visible { border-color: #16202b; }
+  .picto { font-size: var(--picto); line-height: 1.1; }
+  /* break-word et non anywhere : un libellé de plusieurs mots passe à la ligne
+     entre les mots. La largeur minimale des tuiles est par ailleurs calculée
+     sur le mot le plus long, de sorte qu'aucun mot n'a à être coupé. */
+  .nom {
+    font-weight: 700;
+    font-size: var(--nom);
+    line-height: 1.25;
+    white-space: normal;
+    overflow-wrap: break-word;
+  }
+  .detail {
+    font-style: italic;
+    font-size: var(--detail);
+    line-height: 1.3;
+    color: var(--texte-doux);
+    white-space: normal;
+    overflow-wrap: break-word;
+  }
+  .externe { font-size: 11px; font-weight: 700; color: var(--texte-doux); }
+
+  #vide {
+    padding: 24px 12px;
+    font-size: 13.5px;
+    color: var(--texte-doux);
+    line-height: 1.5;
+    white-space: normal;
+    overflow-wrap: break-word;
+  }
+  #vide p { margin: 0 0 10px; }
+
+  /* ------------------------------------------------------------ réglages */
+
+  #config { padding: 12px; }
+  .bloc {
+    background: #ffffff;
+    border: 1px solid var(--bordure);
+    border-radius: 10px;
+    padding: 12px;
+    margin-bottom: 12px;
+  }
+  .bloc h2 {
+    margin: 0 0 10px;
+    font-size: 13px;
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.02em;
+    color: var(--texte-doux);
+  }
+  .rangee { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .rangee + .rangee { margin-top: 10px; }
+  .etiquette { font-size: 12.5px; font-weight: 700; color: var(--texte-doux); }
+  .aide {
+    font-size: 12.5px;
+    color: var(--texte-doux);
+    line-height: 1.45;
+    margin: 8px 0 0;
+    white-space: normal;
+    overflow-wrap: break-word;
+  }
+
+  .zone-edit {
+    border: 1px solid var(--bordure);
+    border-left-width: 4px;
+    border-radius: 8px;
+    padding: 10px;
+    margin-bottom: 10px;
+    background: #ffffff;
+  }
+  .zone-edit.survol { border-color: #16202b; background: #eef2f6; }
+  .tuile-edit {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    align-items: center;
+    padding: 6px;
+    border: 1px solid var(--bordure);
+    border-radius: 8px;
+    margin-top: 6px;
+    background: #fbfcfd;
+  }
+  .tuile-edit.survol { border-color: #16202b; background: #eef2f6; }
+  .poignee {
+    cursor: grab;
+    font-size: 14px;
+    color: var(--texte-doux);
+    padding: 2px 4px;
+    border: 1px solid var(--bordure);
+    border-radius: 5px;
+    background: #ffffff;
+    user-select: none;
+  }
+  .champ-nom { flex: 2 1 120px; min-width: 100px; }
+  .champ-detail { flex: 2 1 130px; min-width: 100px; }
+  .champ-url { flex: 3 1 180px; min-width: 120px; }
+  .bouton-picto { font-size: 18px; line-height: 1; padding: 4px 8px; min-width: 40px; }
+  .pastille {
+    width: 18px;
+    height: 18px;
+    border-radius: 5px;
+    border: 1px solid rgba(0, 0, 0, 0.2);
+    padding: 0;
+    cursor: pointer;
+  }
+  .pastille[aria-pressed="true"] { outline: 2px solid #16202b; outline-offset: 1px; }
+  .url-invalide { border-color: #b3261e; background: #fdf2f2; }
+
+  /* ------------------------------------------------------- fenêtres */
+
+  .voile {
+    position: fixed;
+    inset: 0;
+    background: rgba(15, 23, 42, 0.45);
+    display: flex;
+    align-items: flex-start;
+    justify-content: center;
+    padding: 16px;
+    overflow: auto;
+    z-index: 10;
+  }
+  .fenetre {
+    background: #ffffff;
+    border-radius: 12px;
+    padding: 14px;
+    width: 100%;
+    max-width: 460px;
+    border: 1px solid var(--bordure);
+  }
+  .fenetre h2 { margin: 0 0 10px; font-size: 14px; }
+  .grille-emoji {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(38px, 1fr));
+    gap: 4px;
+    margin-top: 10px;
+  }
+  .grille-emoji button { font-size: 20px; padding: 4px 0; line-height: 1.2; }
+  #emoji-aucun { font-size: 12.5px; color: var(--texte-doux); margin-top: 10px; }
+  #echange-texte {
+    width: 100%;
+    min-height: 160px;
+    font-family: ui-monospace, Menlo, Consolas, monospace;
+    font-size: 12px;
+    white-space: pre;
+    overflow: auto;
+  }
+</style>
+</head>
+<body>
+  <div id="bandeaux"></div>
+
+  <div id="barre">
+    <input id="recherche" type="search" placeholder="Rechercher" aria-label="Rechercher une tuile">
+    <span id="compteur"></span>
+    <span class="espace"></span>
+    <button id="btn-configurer" type="button">Configurer</button>
+    <button id="btn-deverrouiller" type="button" hidden>Déverrouiller</button>
+    <button id="btn-terminer" type="button" class="principal" hidden>Terminer</button>
+  </div>
+
+  <div id="filtres"></div>
+  <div id="vue"><div id="zones"></div></div>
+  <div id="config" hidden></div>
+
+  <div id="fenetre-emoji" class="voile" hidden>
+    <div class="fenetre" role="dialog" aria-label="Choisir un emoji">
+      <h2>Choisir un emoji</h2>
+      <div class="rangee">
+        <input id="emoji-recherche" type="search" placeholder="Rechercher : batiment, eau, plan…" aria-label="Rechercher un emoji" style="flex:1 1 180px">
+        <input id="emoji-libre" type="text" maxlength="8" placeholder="ou coller" aria-label="Saisir un emoji" style="width:90px">
+        <button id="emoji-valider" type="button">Valider</button>
+        <button id="emoji-vider" type="button">Aucun</button>
+        <button id="emoji-fermer" type="button">Fermer</button>
+      </div>
+      <div id="grille-emoji" class="grille-emoji"></div>
+      <p id="emoji-aucun" hidden>Aucun emoji ne correspond à cette recherche.</p>
+    </div>
+  </div>
+
+  <div id="fenetre-echange" class="voile" hidden>
+    <div class="fenetre" role="dialog" aria-label="Export et import">
+      <h2 id="echange-titre">Exporter la configuration</h2>
+      <p class="aide" id="echange-aide"></p>
+      <textarea id="echange-texte" spellcheck="false" aria-label="Configuration au format JSON"></textarea>
+      <div class="rangee" style="margin-top:10px">
+        <button id="echange-copier" type="button">Tout sélectionner</button>
+        <button id="echange-importer" type="button" class="principal" hidden>Importer</button>
+        <span class="espace"></span>
+        <button id="echange-fermer" type="button">Fermer</button>
+      </div>
+    </div>
+  </div>
+
+<script>
+(function () {
+  "use strict";
+
+  const VERSION_CONFIG = 1;
+  const CLE_LOCALE = `widget-tuiles.config`;
+  const DELAI_GRIST = 1500;
+  const MAX_TEXTE = 120;
+  const MAX_URL = 2000;
+  const MAX_ZONES = 40;
+  const MAX_TUILES = 200;
+  const LARGEUR_TUILE_MAX = 300;
+
+  // Palette fermée : une couleur de zone ne peut être qu'un de ces
+  // identifiants. Une configuration importée qui en propose un autre se voit
+  // réattribuer la première couleur, sans qu'aucune valeur venue de
+  // l'extérieur ne soit injectée dans une feuille de style.
+  const PALETTE = [
+    { id: `bleu`, nom: `Bleu`, trait: `#1a73c7`, teinte: `#eaf2fb`, texte: `#0f4c87` },
+    { id: `vert`, nom: `Vert`, trait: `#2e7d52`, teinte: `#eaf5ee`, texte: `#1d5436` },
+    { id: `orange`, nom: `Orange`, trait: `#c2680f`, teinte: `#fdf1e4`, texte: `#8a4a0b` },
+    { id: `rouge`, nom: `Rouge`, trait: `#b3261e`, teinte: `#fceceb`, texte: `#7a1a15` },
+    { id: `violet`, nom: `Violet`, trait: `#6b4fbb`, teinte: `#f0ecfb`, texte: `#4a3783` },
+    { id: `turquoise`, nom: `Turquoise`, trait: `#0f7b7b`, teinte: `#e6f4f4`, texte: `#0a5555` },
+    { id: `rose`, nom: `Rose`, trait: `#a3376b`, teinte: `#fbebf2`, texte: `#72264b` },
+    { id: `ocre`, nom: `Ocre`, trait: `#8a6d1f`, teinte: `#f7f2e2`, texte: `#5f4b15` },
+    { id: `indigo`, nom: `Indigo`, trait: `#3b4b9a`, teinte: `#ebeefa`, texte: `#29346c` },
+    { id: `gris`, nom: `Gris`, trait: `#5b6472`, teinte: `#eef0f3`, texte: `#3b424c` },
+  ];
+
+  const TAILLES = {
+    petite: { libelle: `Petite`, min: 110, picto: `22px`, nom: `12.5px`, detail: `11px`, pad: `8px 9px 10px`, gap: `8px`, colonne: `260px` },
+    moyenne: { libelle: `Moyenne`, min: 150, picto: `30px`, nom: `14px`, detail: `12.5px`, pad: `10px 12px 13px`, gap: `10px`, colonne: `330px` },
+    grande: { libelle: `Grande`, min: 200, picto: `40px`, nom: `16px`, detail: `13.5px`, pad: `14px 16px 16px`, gap: `12px`, colonne: `440px` },
+  };
+
+  // Emojis proposés, avec des mots-clés sans accent pour la recherche.
+  const EMOJIS = [
+    [`🏢`, `batiment immeuble bureau site`],
+    [`🏛️`, `batiment administration institution`],
+    [`🏫`, `ecole universite enseignement`],
+    [`🏭`, `usine technique chaufferie`],
+    [`🏘️`, `batiments quartier patrimoine`],
+    [`🏗️`, `chantier travaux construction`],
+    [`🏠`, `maison logement`],
+    [`🏥`, `sante infirmerie`],
+    [`🚪`, `porte salle acces`],
+    [`🪟`, `fenetre menuiserie vitrage`],
+    [`🛗`, `ascenseur elevateur`],
+    [`🪜`, `echelle etage plan`],
+    [`🧱`, `mur maconnerie bati`],
+    [`🧰`, `outils maintenance`],
+    [`🔧`, `maintenance reparation`],
+    [`🔨`, `travaux marteau`],
+    [`🛠️`, `travaux outils programmation`],
+    [`⚙️`, `technique reglage gtb`],
+    [`🔩`, `technique pieces`],
+    [`🧯`, `securite incendie extincteur`],
+    [`🚧`, `chantier portail barriere`],
+    [`🛡️`, `securite protection`],
+    [`🔑`, `cle acces trousseau`],
+    [`🗝️`, `cle serrure acces`],
+    [`🔒`, `securite verrouillage`],
+    [`🔓`, `deverrouille ouvert`],
+    [`⚡`, `electricite energie consommation`],
+    [`💡`, `eclairage lampe energie`],
+    [`🔌`, `compteur prise branchement`],
+    [`🔋`, `batterie stockage energie`],
+    [`🪫`, `batterie faible`],
+    [`🔥`, `gaz chauffage chaufferie combustion`],
+    [`💧`, `eau fluide compteur`],
+    [`🚿`, `eau sanitaire douche`],
+    [`🌡️`, `temperature thermique confort`],
+    [`❄️`, `froid climatisation rafraichissement`],
+    [`☀️`, `solaire soleil photovoltaique`],
+    [`🌬️`, `ventilation air souffle`],
+    [`♻️`, `recyclage dechets economie`],
+    [`🌱`, `environnement durable vegetal`],
+    [`🌍`, `climat planete carbone`],
+    [`🧊`, `glace froid`],
+    [`🛢️`, `fioul cuve carburant`],
+    [`⛽`, `carburant energie`],
+    [`🔆`, `luminosite eclairage`],
+    [`📊`, `graphique tableau de bord statistiques`],
+    [`📈`, `hausse evolution courbe suivi`],
+    [`📉`, `baisse economie reduction`],
+    [`📋`, `liste releve inventaire`],
+    [`📄`, `document fiche page`],
+    [`📑`, `documents onglets rapport`],
+    [`📁`, `dossier classement`],
+    [`📂`, `dossier ouvert archives`],
+    [`🗂️`, `classement index repertoire`],
+    [`🗃️`, `archives base de donnees`],
+    [`🗄️`, `archives armoire stockage`],
+    [`📚`, `documentation bibliotheque reference`],
+    [`📖`, `guide manuel lecture`],
+    [`📝`, `note saisie redaction`],
+    [`✏️`, `edition modification crayon`],
+    [`📌`, `epingle important`],
+    [`📎`, `piece jointe lien`],
+    [`🔖`, `signet marque page`],
+    [`🧾`, `facture depense justificatif`],
+    [`📅`, `calendrier planning date`],
+    [`🗓️`, `planning programmation echeances`],
+    [`⏱️`, `duree mesure temps`],
+    [`⏰`, `alerte rappel horaire`],
+    [`💻`, `informatique poste ordinateur`],
+    [`🖥️`, `supervision ecran gtb`],
+    [`⌨️`, `saisie clavier`],
+    [`🖱️`, `souris navigation`],
+    [`🖨️`, `impression imprimante`],
+    [`📱`, `mobile telephone`],
+    [`☎️`, `telephone contact`],
+    [`💾`, `sauvegarde enregistrement`],
+    [`🧮`, `calcul conversion table`],
+    [`🔍`, `recherche analyse audit`],
+    [`🔎`, `recherche detail inspection`],
+    [`📡`, `telereleve transmission antenne`],
+    [`🛰️`, `satellite teledetection`],
+    [`🌐`, `web internet site`],
+    [`🔗`, `lien raccourci url`],
+    [`🧪`, `essai mesure diagnostic`],
+    [`⚗️`, `analyse laboratoire`],
+    [`🗺️`, `carte plan de site`],
+    [`📍`, `localisation adresse point`],
+    [`🧭`, `orientation reperage`],
+    [`🚗`, `vehicule flotte voiture`],
+    [`🚌`, `transport bus navette`],
+    [`🚲`, `velo mobilite douce`],
+    [`🚛`, `livraison camion logistique`],
+    [`🅿️`, `parking stationnement`],
+    [`🚦`, `circulation signalisation`],
+    [`🛣️`, `voirie route acces`],
+    [`👤`, `personne contact utilisateur`],
+    [`👥`, `equipe groupe occupants`],
+    [`🤝`, `partenariat convention accord`],
+    [`📣`, `communication annonce`],
+    [`💬`, `echange commentaire message`],
+    [`✉️`, `courrier message mail`],
+    [`📧`, `mail courriel electronique`],
+    [`✅`, `valide conforme termine`],
+    [`☑️`, `coche verification controle`],
+    [`❗`, `alerte important anomalie`],
+    [`❓`, `question aide incertitude`],
+    [`⭐`, `favori important priorite`],
+    [`🎯`, `objectif cible trajectoire`],
+    [`🏆`, `resultat performance reussite`],
+    [`🔔`, `alerte notification rappel`],
+    [`💶`, `budget euro financement`],
+    [`💰`, `budget subvention financement`],
+    [`💳`, `depense paiement`],
+    [`🧩`, `module composant synthese`],
+    [`🎒`, `fiche information dossier`],
+    [`🗜️`, `compression reduction`],
+    [`⚖️`, `reglementation conformite droit`],
+    [`📐`, `surface mesure geometrie`],
+    [`📏`, `mesure longueur surface`],
+    [`🧷`, `attache rattachement`],
+    [`🏷️`, `etiquette categorie type`],
+  ];
+
+  // ------------------------------------------------------------- état
+
+  const etat = {
+    config: configVide(),
+    hote: `inconnu`,           // grist, local
+    optionsGristUtilisables: false,
+    mode: `vue`,               // vue, config
+    recherche: ``,
+    zonesMasquees: {},
+    glisse: null,
+    cibleEmoji: null,
+    messages: [],
+    pret: false,
+  };
+
+  function configVide() {
+    return { version: VERSION_CONFIG, taille: `moyenne`, verrouille: false, zones: [] };
+  }
+
+  function identifiant() {
+    const aleatoire = new Uint32Array(2);
+    if (window.crypto && window.crypto.getRandomValues) {
+      window.crypto.getRandomValues(aleatoire);
+    } else {
+      aleatoire[0] = Math.floor(Math.random() * 4294967295);
+      aleatoire[1] = Math.floor(Math.random() * 4294967295);
+    }
+    return aleatoire[0].toString(36) + aleatoire[1].toString(36);
+  }
+
+  // ---------------------------------------------------------- outils
+
+  function texte(valeur, maximum) {
+    if (valeur === null || valeur === undefined) { return ``; }
+    const s = String(valeur).replace(/[\u0000-\u001f\u007f]/g, ``).trim();
+    return s.length > maximum ? s.slice(0, maximum) : s;
+  }
+
+  function normaliserRecherche(s) {
+    return String(s || ``).toLowerCase().normalize(`NFD`).replace(/[̀-ͯ]/g, ``).trim();
+  }
+
+  // Seuls http, https et mailto sont acceptés. Tout le reste, à commencer par
+  // javascript: et data:, est refusé : une adresse saisie ou importée ne peut
+  // donc pas exécuter de code dans la page.
+  function urlSure(brut) {
+    const s = texte(brut, MAX_URL);
+    if (s === ``) { return null; }
+    let analysee;
+    try {
+      analysee = new URL(s, document.baseURI);
+    } catch (e) {
+      return null;
+    }
+    const protocole = analysee.protocol.toLowerCase();
+    if (protocole !== `http:` && protocole !== `https:` && protocole !== `mailto:`) { return null; }
+    return analysee.href;
+  }
+
+  function couleurDe(id) {
+    for (let i = 0; i < PALETTE.length; i++) {
+      if (PALETTE[i].id === id) { return PALETTE[i]; }
+    }
+    return PALETTE[0];
+  }
+
+  function tailleCourante() {
+    return TAILLES[etat.config.taille] || TAILLES.moyenne;
+  }
+
+  // Une configuration peut venir des options du widget, du navigateur ou d'un
+  // import manuel : elle est systématiquement reconstruite champ par champ,
+  // avec des valeurs par défaut. Rien de ce qui n'est pas attendu n'est
+  // conservé.
+  function normaliserConfig(brut) {
+    const sortie = configVide();
+    if (!brut || typeof brut !== `object`) { return sortie; }
+    if (TAILLES[brut.taille]) { sortie.taille = brut.taille; }
+    sortie.verrouille = brut.verrouille === true;
+    const zones = Array.isArray(brut.zones) ? brut.zones.slice(0, MAX_ZONES) : [];
+    zones.forEach(function (z) {
+      if (!z || typeof z !== `object`) { return; }
+      const zone = {
+        id: texte(z.id, 40) || identifiant(),
+        titre: texte(z.titre, MAX_TEXTE),
+        couleur: couleurDe(texte(z.couleur, 20)).id,
+        tuiles: [],
+      };
+      const tuiles = Array.isArray(z.tuiles) ? z.tuiles.slice(0, MAX_TUILES) : [];
+      tuiles.forEach(function (t) {
+        if (!t || typeof t !== `object`) { return; }
+        const cible = t.cible === `onglet` || t.cible === `courant` ? t.cible : `auto`;
+        zone.tuiles.push({
+          id: texte(t.id, 40) || identifiant(),
+          nom: texte(t.nom, MAX_TEXTE),
+          detail: texte(t.detail, MAX_TEXTE),
+          picto: texte(t.picto, 8),
+          url: texte(t.url, MAX_URL),
+          cible: cible,
+        });
+      });
+      sortie.zones.push(zone);
+    });
+    return sortie;
+  }
+
+  // --------------------------------------------------- enregistrement
+
+  let gristPret = false;
+
+  function enregistrer() {
+    if (etat.hote === `grist` && etat.optionsGristUtilisables) {
+      try {
+        const promesse = grist.setOption(`config`, etat.config);
+        if (promesse && typeof promesse.catch === `function`) {
+          promesse.catch(function (e) { echecEnregistrementGrist(e); enregistrerLocalement(); });
+        }
+        return;
+      } catch (e) {
+        echecEnregistrementGrist(e);
+      }
+    }
+    enregistrerLocalement();
+  }
+
+  function echecEnregistrementGrist(e) {
+    etat.optionsGristUtilisables = false;
+    signaler(`avert`, `L'enregistrement dans le document a échoué (` + (e && e.message ? e.message : `erreur inconnue`) + `). La configuration est désormais conservée dans ce navigateur seulement : utilisez l'export pour ne pas la perdre.`);
+  }
+
+  function enregistrerLocalement() {
+    try {
+      window.localStorage.setItem(CLE_LOCALE, JSON.stringify(etat.config));
+    } catch (e) {
+      signaler(`avert`, `La configuration n'a pas pu être enregistrée dans ce navigateur. Exportez-la pour ne pas la perdre.`);
+    }
+  }
+
+  function chargerDepuisNavigateur() {
+    try {
+      const brut = window.localStorage.getItem(CLE_LOCALE);
+      if (!brut) { return configVide(); }
+      return normaliserConfig(JSON.parse(brut));
+    } catch (e) {
+      return configVide();
+    }
+  }
+
+  // ------------------------------------------------------- bandeaux
+
+  function signaler(genre, message) {
+    etat.messages = etat.messages.filter(function (m) { return m.message !== message; });
+    etat.messages.push({ genre: genre, message: message });
+    rendreBandeaux();
+  }
+
+  function rendreBandeaux() {
+    const hote = document.getElementById(`bandeaux`);
+    hote.textContent = ``;
+    etat.messages.forEach(function (m) {
+      const d = document.createElement(`div`);
+      d.className = `bandeau bandeau-` + m.genre;
+      d.textContent = m.message;
+      hote.appendChild(d);
+    });
+  }
+
+  // --------------------------------------------------------- ouverture
+
+  // Une page du même document hôte s'ouvre dans l'onglet courant, ce qui donne
+  // le comportement d'un menu. Tout le reste s'ouvre dans un nouvel onglet,
+  // pour ne pas faire perdre sa place à l'utilisateur. Le réglage par tuile
+  // permet de forcer l'un ou l'autre.
+  function ouvertureNouvelOnglet(url, cible) {
+    if (cible === `onglet`) { return true; }
+    if (cible === `courant`) { return false; }
+    let hoteParent = null;
+    try {
+      hoteParent = window.self !== window.top ? new URL(document.referrer || ``).host : location.host;
+    } catch (e) {
+      hoteParent = null;
+    }
+    try {
+      const h = new URL(url).host;
+      return !hoteParent || h !== hoteParent;
+    } catch (e) {
+      return true;
+    }
+  }
+
+  let repli = null;
+  function annulerRepli() {
+    if (repli !== null) { clearTimeout(repli); repli = null; }
+  }
+  window.addEventListener(`pagehide`, annulerRepli);
+  window.addEventListener(`beforeunload`, annulerRepli);
+
+  // Le widget est dans un cadre. Si la page hôte refuse d'être remplacée, la
+  // navigation échoue sans erreur : on ouvre alors un onglet peu après, le
+  // widget étant encore vivant, preuve que rien ne s'est passé.
+  function planifierRepli(url) {
+    annulerRepli();
+    repli = setTimeout(function () {
+      repli = null;
+      try { window.open(url, `_blank`, `noopener,noreferrer`); } catch (e) { /* rien de plus */ }
+    }, 1200);
+  }
+
+  // ------------------------------------------------------------ vue
+
+  function tuilesVisibles() {
+    const q = normaliserRecherche(etat.recherche);
+    const mots = q === `` ? [] : q.split(/\s+/).filter(Boolean);
+    const sortie = [];
+    etat.config.zones.forEach(function (zone) {
+      if (etat.zonesMasquees[zone.id]) { return; }
+      const gardees = zone.tuiles.filter(function (t) {
+        if (!mots.length) { return true; }
+        const cible = normaliserRecherche([t.nom, t.detail, zone.titre].join(` `));
+        return mots.every(function (mot) { return cible.indexOf(mot) !== -1; });
+      });
+      if (gardees.length) { sortie.push({ zone: zone, tuiles: gardees }); }
+    });
+    return sortie;
+  }
+
+  function appliquerTaille() {
+    const t = tailleCourante();
+    const r = document.documentElement.style;
+    r.setProperty(`--picto`, t.picto);
+    r.setProperty(`--nom`, t.nom);
+    r.setProperty(`--detail`, t.detail);
+    r.setProperty(`--pad-tuile`, t.pad);
+    r.setProperty(`--gap`, t.gap);
+    r.setProperty(`--colonne`, t.colonne);
+
+    // Largeur minimale élargie si nécessaire pour que le mot le plus long
+    // tienne sans être coupé.
+    const mots = [];
+    etat.config.zones.forEach(function (z) {
+      z.tuiles.forEach(function (tu) {
+        (tu.nom || ``).split(/[\s ]+/).forEach(function (m) { if (m) { mots.push(m); } });
+      });
+    });
+    let besoin = 0;
+    if (mots.length) {
+      const ctx = contexteMesure();
+      ctx.font = `700 ` + t.nom + ` ` + getComputedStyle(document.body).fontFamily;
+      mots.forEach(function (m) {
+        const l = ctx.measureText(m).width;
+        if (l > besoin) { besoin = l; }
+      });
+    }
+    const parts = t.pad.split(/\s+/);
+    const lateral = (parseFloat(parts.length > 1 ? parts[1] : parts[0]) || 0) * 2;
+    const mini = Math.min(Math.max(t.min, Math.ceil(besoin) + lateral + 6), LARGEUR_TUILE_MAX);
+    r.setProperty(`--tuile-min`, mini + `px`);
+  }
+
+  let ctxMesure = null;
+  function contexteMesure() {
+    if (!ctxMesure) { ctxMesure = document.createElement(`canvas`).getContext(`2d`); }
+    return ctxMesure;
+  }
+
+  function uniformiserHauteurs() {
+    const r = document.documentElement.style;
+    r.setProperty(`--hauteur-tuile`, `auto`);
+    let haute = 0;
+    document.querySelectorAll(`#zones .tuile`).forEach(function (t) {
+      const h = t.getBoundingClientRect().height;
+      if (h > haute) { haute = h; }
+    });
+    r.setProperty(`--hauteur-tuile`, haute > 0 ? Math.ceil(haute) + `px` : `auto`);
+  }
+
+  function construireTuile(tuile, zone) {
+    const couleur = couleurDe(zone.couleur);
+    const url = urlSure(tuile.url);
+    const element = document.createElement(url ? `a` : `div`);
+    element.className = `tuile`;
+    element.style.borderTopColor = couleur.trait;
+
+    const infos = [tuile.nom || `(sans nom)`];
+    if (tuile.detail) { infos.push(tuile.detail); }
+    infos.push(zone.titre || `Sans zone`);
+    infos.push(url ? url : `Adresse manquante ou refusée`);
+    element.title = infos.join(`\n`);
+
+    if (url) {
+      const nouvelOnglet = ouvertureNouvelOnglet(url, tuile.cible);
+      element.href = url;
+      element.rel = `noopener noreferrer`;
+      element.target = nouvelOnglet ? `_blank` : `_top`;
+      if (!nouvelOnglet) {
+        element.addEventListener(`click`, function (ev) {
+          if (ev.button !== 0 || ev.ctrlKey || ev.metaKey || ev.shiftKey || ev.altKey) { return; }
+          planifierRepli(url);
+        });
+      }
+    } else {
+      element.style.background = `#f1f3f6`;
+      element.style.borderStyle = `dashed`;
+      element.style.cursor = `default`;
+    }
+
+    if (tuile.picto) {
+      const p = document.createElement(`div`);
+      p.className = `picto`;
+      p.textContent = tuile.picto;
+      element.appendChild(p);
+    }
+
+    const nom = document.createElement(`div`);
+    nom.className = `nom`;
+    nom.textContent = tuile.nom || `(sans nom)`;
+    element.appendChild(nom);
+
+    if (tuile.detail) {
+      const d = document.createElement(`div`);
+      d.className = `detail`;
+      d.textContent = tuile.detail;
+      element.appendChild(d);
+    }
+
+    if (!url) {
+      const avert = document.createElement(`div`);
+      avert.className = `externe`;
+      avert.style.color = `#7a1f1f`;
+      avert.textContent = `Adresse manquante`;
+      element.appendChild(avert);
+    }
+
+    return element;
+  }
+
+  function rendreFiltres() {
+    const hote = document.getElementById(`filtres`);
+    hote.textContent = ``;
+    if (etat.mode !== `vue` || etat.config.zones.length < 2) { return; }
+    etat.config.zones.forEach(function (zone) {
+      const couleur = couleurDe(zone.couleur);
+      const actif = !etat.zonesMasquees[zone.id];
+      const b = document.createElement(`button`);
+      b.type = `button`;
+      b.className = `puce`;
+      b.setAttribute(`aria-pressed`, actif ? `true` : `false`);
+      b.textContent = (zone.titre || `Sans titre`) + ` (` + zone.tuiles.length + `)`;
+      if (actif) {
+        b.style.background = couleur.teinte;
+        b.style.color = couleur.texte;
+        b.style.borderColor = couleur.trait;
+      }
+      b.addEventListener(`click`, function () {
+        if (etat.zonesMasquees[zone.id]) { delete etat.zonesMasquees[zone.id]; }
+        else { etat.zonesMasquees[zone.id] = true; }
+        rendre();
+      });
+      hote.appendChild(b);
+    });
+  }
+
+  function rendreVue() {
+    const vue = document.getElementById(`vue`);
+    const zonesHote = document.getElementById(`zones`);
+    zonesHote.textContent = ``;
+    vue.hidden = etat.mode !== `vue`;
+    if (etat.mode !== `vue`) { return; }
+
+    const totalTuiles = etat.config.zones.reduce(function (n, z) { return n + z.tuiles.length; }, 0);
+    const groupes = tuilesVisibles();
+    const affichees = groupes.reduce(function (n, g) { return n + g.tuiles.length; }, 0);
+
+    const compteur = document.getElementById(`compteur`);
+    if (totalTuiles === 0) { compteur.textContent = ``; }
+    else if (affichees === totalTuiles) { compteur.textContent = totalTuiles + (totalTuiles > 1 ? ` tuiles` : ` tuile`); }
+    else { compteur.textContent = affichees + ` sur ` + totalTuiles + ` affichées`; }
+
+    if (totalTuiles === 0 && etat.config.zones.length === 0) {
+      zonesHote.appendChild(messageDemarrage());
+      return;
+    }
+    if (affichees === 0) {
+      const v = document.createElement(`div`);
+      v.id = `vide`;
+      const p = document.createElement(`p`);
+      p.textContent = etat.recherche ? `Aucune tuile ne correspond à la recherche.` : `Aucune tuile à afficher avec les filtres actifs.`;
+      v.appendChild(p);
+      zonesHote.appendChild(v);
+      return;
+    }
+
+    groupes.forEach(function (groupe) {
+      const couleur = couleurDe(groupe.zone.couleur);
+      const section = document.createElement(`section`);
+      section.className = `zone`;
+      section.style.background = couleur.teinte;
+      section.style.borderColor = couleur.trait;
+
+      if (groupe.zone.titre) {
+        const titre = document.createElement(`h2`);
+        titre.className = `zone-titre`;
+        titre.style.color = couleur.texte;
+        const libelle = document.createElement(`span`);
+        libelle.textContent = groupe.zone.titre;
+        titre.appendChild(libelle);
+        const nb = document.createElement(`span`);
+        nb.className = `zone-nombre`;
+        nb.textContent = `(` + groupe.tuiles.length + `)`;
+        titre.appendChild(nb);
+        section.appendChild(titre);
+      }
+
+      const grille = document.createElement(`div`);
+      grille.className = `grille`;
+      groupe.tuiles.forEach(function (t) { grille.appendChild(construireTuile(t, groupe.zone)); });
+      section.appendChild(grille);
+      zonesHote.appendChild(section);
+    });
+
+    uniformiserHauteurs();
+  }
+
+  function messageDemarrage() {
+    const v = document.createElement(`div`);
+    v.id = `vide`;
+    const p1 = document.createElement(`p`);
+    p1.textContent = `Aucune zone n'est encore définie. Cliquez sur Configurer pour créer une première zone, puis y ajouter des tuiles.`;
+    const p2 = document.createElement(`p`);
+    p2.textContent = `Une tuile est un raccourci : un emoji, un nom, un détail facultatif, et une adresse vers une page de ce document, vers un autre document, ou vers un site web.`;
+    v.appendChild(p1);
+    v.appendChild(p2);
+    return v;
+  }
+
+  // -------------------------------------------------------- réglages
+
+  function bouton(libelle, classe, action) {
+    const b = document.createElement(`button`);
+    b.type = `button`;
+    if (classe) { b.className = classe; }
+    b.textContent = libelle;
+    b.addEventListener(`click`, action);
+    return b;
+  }
+
+  function champTexte(valeur, placeholder, classe, maximum, action) {
+    const i = document.createElement(`input`);
+    i.type = `text`;
+    i.value = valeur;
+    i.placeholder = placeholder;
+    i.className = classe;
+    i.maxLength = maximum;
+    i.addEventListener(`input`, function () { action(i.value); });
+    return i;
+  }
+
+  function rendreConfig() {
+    const hote = document.getElementById(`config`);
+    hote.hidden = etat.mode !== `config`;
+    hote.textContent = ``;
+    if (etat.mode !== `config`) { return; }
+
+    hote.appendChild(blocGeneral());
+
+    const blocZones = document.createElement(`div`);
+    blocZones.className = `bloc`;
+    const h = document.createElement(`h2`);
+    h.textContent = `Zones et tuiles`;
+    blocZones.appendChild(h);
+
+    etat.config.zones.forEach(function (zone, index) {
+      blocZones.appendChild(editeurZone(zone, index));
+    });
+
+    const ajout = bouton(`Ajouter une zone`, `principal`, function () {
+      etat.config.zones.push({ id: identifiant(), titre: `Nouvelle zone`, couleur: PALETTE[etat.config.zones.length % PALETTE.length].id, tuiles: [] });
+      enregistrer();
+      rendre();
+    });
+    blocZones.appendChild(ajout);
+
+    const aide = document.createElement(`p`);
+    aide.className = `aide`;
+    aide.textContent = `Les poignées à gauche permettent de déplacer une zone ou une tuile par glisser-déposer. Une tuile peut être déposée sur une autre zone pour y être transférée. Les flèches font le même travail au clavier.`;
+    blocZones.appendChild(aide);
+
+    hote.appendChild(blocZones);
+  }
+
+  function blocGeneral() {
+    const bloc = document.createElement(`div`);
+    bloc.className = `bloc`;
+    const h = document.createElement(`h2`);
+    h.textContent = `Réglages généraux`;
+    bloc.appendChild(h);
+
+    const rangeeTaille = document.createElement(`div`);
+    rangeeTaille.className = `rangee`;
+    const et = document.createElement(`span`);
+    et.className = `etiquette`;
+    et.textContent = `Taille des tuiles`;
+    rangeeTaille.appendChild(et);
+    Object.keys(TAILLES).forEach(function (cle) {
+      const b = bouton(TAILLES[cle].libelle, etat.config.taille === cle ? `principal` : ``, function () {
+        etat.config.taille = cle;
+        enregistrer();
+        rendre();
+      });
+      rangeeTaille.appendChild(b);
+    });
+    bloc.appendChild(rangeeTaille);
+
+    const rangeeOutils = document.createElement(`div`);
+    rangeeOutils.className = `rangee`;
+    rangeeOutils.appendChild(bouton(`Exporter`, ``, function () { ouvrirEchange(`export`); }));
+    rangeeOutils.appendChild(bouton(`Importer`, ``, function () { ouvrirEchange(`import`); }));
+    rangeeOutils.appendChild(bouton(etat.config.verrouille ? `Déverrouiller la configuration` : `Verrouiller la configuration`, ``, function () {
+      etat.config.verrouille = !etat.config.verrouille;
+      enregistrer();
+      if (etat.config.verrouille) { etat.mode = `vue`; }
+      rendre();
+    }));
+    bloc.appendChild(rangeeOutils);
+
+    const aide = document.createElement(`p`);
+    aide.className = `aide`;
+    aide.textContent = etat.hote === `grist`
+      ? `La configuration est enregistrée dans les réglages de ce widget, à l'intérieur du document. Elle ne touche à aucune table et le widget ne lit aucune donnée.`
+      : `La configuration est enregistrée dans ce navigateur, sur ce poste. Utilisez l'export pour la transporter ailleurs ou la conserver.`;
+    bloc.appendChild(aide);
+
+    const aideVerrou = document.createElement(`p`);
+    aideVerrou.className = `aide`;
+    aideVerrou.textContent = `Le verrouillage protège d'une fausse manipulation : il se lève d'un clic et ne constitue pas une protection d'accès.`;
+    bloc.appendChild(aideVerrou);
+
+    return bloc;
+  }
+
+  function editeurZone(zone, index) {
+    const couleur = couleurDe(zone.couleur);
+    const bloc = document.createElement(`div`);
+    bloc.className = `zone-edit`;
+    bloc.style.borderLeftColor = couleur.trait;
+    bloc.dataset.zone = String(index);
+
+    const entete = document.createElement(`div`);
+    entete.className = `rangee`;
+
+    const poignee = document.createElement(`span`);
+    poignee.className = `poignee`;
+    poignee.textContent = `⠿`;
+    poignee.title = `Déplacer cette zone`;
+    entete.appendChild(poignee);
+    activerGlisserZone(bloc, poignee, index);
+
+    entete.appendChild(champTexte(zone.titre, `Titre de la zone`, `champ-nom`, MAX_TEXTE, function (v) {
+      zone.titre = texte(v, MAX_TEXTE);
+      enregistrer();
+      rendreVueDifferee();
+    }));
+
+    PALETTE.forEach(function (c) {
+      const b = document.createElement(`button`);
+      b.type = `button`;
+      b.className = `pastille`;
+      b.style.background = c.trait;
+      b.title = c.nom;
+      b.setAttribute(`aria-label`, `Couleur ` + c.nom);
+      b.setAttribute(`aria-pressed`, zone.couleur === c.id ? `true` : `false`);
+      b.addEventListener(`click`, function () {
+        zone.couleur = c.id;
+        enregistrer();
+        rendre();
+      });
+      entete.appendChild(b);
+    });
+
+    entete.appendChild(bouton(`▲`, ``, function () { deplacerZone(index, -1); }));
+    entete.appendChild(bouton(`▼`, ``, function () { deplacerZone(index, 1); }));
+    entete.appendChild(bouton(`Supprimer la zone`, `danger`, function () {
+      if (zone.tuiles.length && !window.confirm(`Supprimer la zone « ` + (zone.titre || `sans titre`) + ` » et ses ` + zone.tuiles.length + ` tuiles ?`)) { return; }
+      etat.config.zones.splice(index, 1);
+      enregistrer();
+      rendre();
+    }));
+    bloc.appendChild(entete);
+
+    zone.tuiles.forEach(function (tuile, rang) {
+      bloc.appendChild(editeurTuile(zone, index, tuile, rang));
+    });
+
+    const ajout = bouton(`Ajouter une tuile`, ``, function () {
+      zone.tuiles.push({ id: identifiant(), nom: ``, detail: ``, picto: ``, url: ``, cible: `auto` });
+      enregistrer();
+      rendre();
+    });
+    ajout.style.marginTop = `8px`;
+    bloc.appendChild(ajout);
+
+    return bloc;
+  }
+
+  function editeurTuile(zone, indexZone, tuile, rang) {
+    const ligne = document.createElement(`div`);
+    ligne.className = `tuile-edit`;
+    ligne.dataset.zone = String(indexZone);
+    ligne.dataset.tuile = String(rang);
+
+    const poignee = document.createElement(`span`);
+    poignee.className = `poignee`;
+    poignee.textContent = `⠿`;
+    poignee.title = `Déplacer cette tuile`;
+    ligne.appendChild(poignee);
+    activerGlisserTuile(ligne, poignee, indexZone, rang);
+
+    const btnPicto = bouton(tuile.picto || `＋`, `bouton-picto`, function () {
+      ouvrirEmoji(tuile);
+    });
+    btnPicto.title = `Choisir un emoji`;
+    ligne.appendChild(btnPicto);
+
+    ligne.appendChild(champTexte(tuile.nom, `Nom`, `champ-nom`, MAX_TEXTE, function (v) {
+      tuile.nom = texte(v, MAX_TEXTE);
+      enregistrer();
+      rendreVueDifferee();
+    }));
+    ligne.appendChild(champTexte(tuile.detail, `Détail`, `champ-detail`, MAX_TEXTE, function (v) {
+      tuile.detail = texte(v, MAX_TEXTE);
+      enregistrer();
+      rendreVueDifferee();
+    }));
+
+    const champUrl = champTexte(tuile.url, `https://…`, `champ-url`, MAX_URL, function (v) {
+      tuile.url = texte(v, MAX_URL);
+      champUrl.classList.toggle(`url-invalide`, tuile.url !== `` && urlSure(tuile.url) === null);
+      enregistrer();
+      rendreVueDifferee();
+    });
+    champUrl.classList.toggle(`url-invalide`, tuile.url !== `` && urlSure(tuile.url) === null);
+    champUrl.title = `Adresse commençant par https:// , http:// ou mailto:`;
+    ligne.appendChild(champUrl);
+
+    const cible = document.createElement(`select`);
+    [[`auto`, `Ouverture automatique`], [`courant`, `Onglet courant`], [`onglet`, `Nouvel onglet`]].forEach(function (o) {
+      const opt = document.createElement(`option`);
+      opt.value = o[0];
+      opt.textContent = o[1];
+      if (tuile.cible === o[0]) { opt.selected = true; }
+      cible.appendChild(opt);
+    });
+    cible.addEventListener(`change`, function () {
+      tuile.cible = cible.value;
+      enregistrer();
+      rendreVueDifferee();
+    });
+    ligne.appendChild(cible);
+
+    ligne.appendChild(bouton(`▲`, ``, function () { deplacerTuile(indexZone, rang, -1); }));
+    ligne.appendChild(bouton(`▼`, ``, function () { deplacerTuile(indexZone, rang, 1); }));
+    ligne.appendChild(bouton(`✕`, `danger`, function () {
+      zone.tuiles.splice(rang, 1);
+      enregistrer();
+      rendre();
+    }));
+
+    return ligne;
+  }
+
+  // ------------------------------------------------- déplacements
+
+  function deplacerZone(index, sens) {
+    const cible = index + sens;
+    if (cible < 0 || cible >= etat.config.zones.length) { return; }
+    const z = etat.config.zones.splice(index, 1)[0];
+    etat.config.zones.splice(cible, 0, z);
+    enregistrer();
+    rendre();
+  }
+
+  function deplacerTuile(indexZone, rang, sens) {
+    const tuiles = etat.config.zones[indexZone].tuiles;
+    const cible = rang + sens;
+    if (cible < 0 || cible >= tuiles.length) { return; }
+    const t = tuiles.splice(rang, 1)[0];
+    tuiles.splice(cible, 0, t);
+    enregistrer();
+    rendre();
+  }
+
+  function transferer(deZone, deRang, versZone, versRang) {
+    const source = etat.config.zones[deZone];
+    const destination = etat.config.zones[versZone];
+    if (!source || !destination) { return; }
+    const t = source.tuiles.splice(deRang, 1)[0];
+    if (!t) { return; }
+    const position = versRang === null || versRang === undefined ? destination.tuiles.length : Math.max(0, Math.min(versRang, destination.tuiles.length));
+    destination.tuiles.splice(position, 0, t);
+    enregistrer();
+    rendre();
+  }
+
+  function activerGlisserZone(bloc, poignee, index) {
+    poignee.addEventListener(`mousedown`, function () { bloc.draggable = true; });
+    poignee.addEventListener(`mouseup`, function () { bloc.draggable = false; });
+    bloc.addEventListener(`dragstart`, function (ev) {
+      etat.glisse = { type: `zone`, zone: index };
+      ev.dataTransfer.effectAllowed = `move`;
+      try { ev.dataTransfer.setData(`text/plain`, `zone`); } catch (e) { /* Firefox exige un appel */ }
+      ev.stopPropagation();
+    });
+    bloc.addEventListener(`dragend`, function () {
+      bloc.draggable = false;
+      etat.glisse = null;
+      document.querySelectorAll(`.survol`).forEach(function (e) { e.classList.remove(`survol`); });
+    });
+    bloc.addEventListener(`dragover`, function (ev) {
+      if (!etat.glisse) { return; }
+      ev.preventDefault();
+      bloc.classList.add(`survol`);
+    });
+    bloc.addEventListener(`dragleave`, function () { bloc.classList.remove(`survol`); });
+    bloc.addEventListener(`drop`, function (ev) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      bloc.classList.remove(`survol`);
+      const g = etat.glisse;
+      etat.glisse = null;
+      if (!g) { return; }
+      if (g.type === `zone`) {
+        if (g.zone === index) { return; }
+        const z = etat.config.zones.splice(g.zone, 1)[0];
+        etat.config.zones.splice(index, 0, z);
+        enregistrer();
+        rendre();
+      } else {
+        transferer(g.zone, g.tuile, index, null);
+      }
+    });
+  }
+
+  function activerGlisserTuile(ligne, poignee, indexZone, rang) {
+    poignee.addEventListener(`mousedown`, function () { ligne.draggable = true; });
+    poignee.addEventListener(`mouseup`, function () { ligne.draggable = false; });
+    ligne.addEventListener(`dragstart`, function (ev) {
+      etat.glisse = { type: `tuile`, zone: indexZone, tuile: rang };
+      ev.dataTransfer.effectAllowed = `move`;
+      try { ev.dataTransfer.setData(`text/plain`, `tuile`); } catch (e) { /* Firefox exige un appel */ }
+      ev.stopPropagation();
+    });
+    ligne.addEventListener(`dragend`, function () {
+      ligne.draggable = false;
+      etat.glisse = null;
+      document.querySelectorAll(`.survol`).forEach(function (e) { e.classList.remove(`survol`); });
+    });
+    ligne.addEventListener(`dragover`, function (ev) {
+      if (!etat.glisse || etat.glisse.type !== `tuile`) { return; }
+      ev.preventDefault();
+      ev.stopPropagation();
+      ligne.classList.add(`survol`);
+    });
+    ligne.addEventListener(`dragleave`, function () { ligne.classList.remove(`survol`); });
+    ligne.addEventListener(`drop`, function (ev) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      ligne.classList.remove(`survol`);
+      const g = etat.glisse;
+      etat.glisse = null;
+      if (!g || g.type !== `tuile`) { return; }
+      if (g.zone === indexZone && g.tuile === rang) { return; }
+      transferer(g.zone, g.tuile, indexZone, rang);
+    });
+  }
+
+  // ------------------------------------------------------- emojis
+
+  function ouvrirEmoji(tuile) {
+    etat.cibleEmoji = tuile;
+    document.getElementById(`emoji-recherche`).value = ``;
+    document.getElementById(`emoji-libre`).value = tuile.picto || ``;
+    remplirEmojis(``);
+    document.getElementById(`fenetre-emoji`).hidden = false;
+    document.getElementById(`emoji-recherche`).focus();
+  }
+
+  function fermerEmoji() {
+    etat.cibleEmoji = null;
+    document.getElementById(`fenetre-emoji`).hidden = true;
+  }
+
+  function appliquerEmoji(valeur) {
+    if (!etat.cibleEmoji) { return; }
+    etat.cibleEmoji.picto = texte(valeur, 8);
+    enregistrer();
+    fermerEmoji();
+    rendre();
+  }
+
+  function remplirEmojis(filtre) {
+    const grille = document.getElementById(`grille-emoji`);
+    grille.textContent = ``;
+    const q = normaliserRecherche(filtre);
+    let trouves = 0;
+    EMOJIS.forEach(function (entree) {
+      if (q !== `` && entree[1].indexOf(q) === -1) { return; }
+      trouves++;
+      const b = document.createElement(`button`);
+      b.type = `button`;
+      b.textContent = entree[0];
+      b.title = entree[1];
+      b.addEventListener(`click`, function () { appliquerEmoji(entree[0]); });
+      grille.appendChild(b);
+    });
+    document.getElementById(`emoji-aucun`).hidden = trouves > 0;
+  }
+
+  // --------------------------------------------- export et import
+
+  function ouvrirEchange(sens) {
+    const fenetre = document.getElementById(`fenetre-echange`);
+    const zone = document.getElementById(`echange-texte`);
+    const titre = document.getElementById(`echange-titre`);
+    const aide = document.getElementById(`echange-aide`);
+    const importer = document.getElementById(`echange-importer`);
+
+    if (sens === `export`) {
+      titre.textContent = `Exporter la configuration`;
+      aide.textContent = `Sélectionnez ce texte et copiez-le. Vous pourrez le coller dans un autre document, ou le conserver comme sauvegarde.`;
+      zone.value = JSON.stringify(etat.config, null, 2);
+      zone.readOnly = true;
+      importer.hidden = true;
+    } else {
+      titre.textContent = `Importer une configuration`;
+      aide.textContent = `Collez ici une configuration exportée, puis cliquez sur Importer. La configuration actuelle sera entièrement remplacée.`;
+      zone.value = ``;
+      zone.readOnly = false;
+      importer.hidden = false;
+    }
+    fenetre.hidden = false;
+    zone.focus();
+  }
+
+  function importerTexte() {
+    const zone = document.getElementById(`echange-texte`);
+    let brut;
+    try {
+      brut = JSON.parse(zone.value);
+    } catch (e) {
+      signaler(`erreur`, `Le texte collé n'est pas une configuration valide : ` + (e && e.message ? e.message : `format illisible`) + `.`);
+      return;
+    }
+    const nouvelle = normaliserConfig(brut);
+    if (!nouvelle.zones.length) {
+      signaler(`avert`, `La configuration importée ne contient aucune zone exploitable. Rien n'a été remplacé.`);
+      return;
+    }
+    if (!window.confirm(`Remplacer la configuration actuelle par celle-ci ? Elle contient ` + nouvelle.zones.length + ` zone(s).`)) { return; }
+    etat.config = nouvelle;
+    etat.zonesMasquees = {};
+    enregistrer();
+    document.getElementById(`fenetre-echange`).hidden = true;
+    signaler(`info`, `Configuration importée : ` + nouvelle.zones.length + ` zone(s).`);
+    rendre();
+  }
+
+  // --------------------------------------------------------- rendu
+
+  let rendreDiffere = null;
+  function rendreVueDifferee() {
+    if (rendreDiffere !== null) { return; }
+    rendreDiffere = requestAnimationFrame(function () {
+      rendreDiffere = null;
+      appliquerTaille();
+      if (etat.mode === `vue`) { uniformiserHauteurs(); }
+    });
+  }
+
+  function rendre() {
+    appliquerTaille();
+    const enVue = etat.mode === `vue`;
+    document.getElementById(`recherche`).hidden = !enVue || etat.config.zones.length === 0;
+    document.getElementById(`compteur`).hidden = !enVue;
+    document.getElementById(`btn-configurer`).hidden = !enVue || etat.config.verrouille;
+    document.getElementById(`btn-deverrouiller`).hidden = !enVue || !etat.config.verrouille;
+    document.getElementById(`btn-terminer`).hidden = enVue;
+    rendreFiltres();
+    rendreVue();
+    rendreConfig();
+  }
+
+  window.addEventListener(`resize`, function () {
+    if (etat.mode === `vue`) { rendreVueDifferee(); }
+  });
+
+  // ---------------------------------------------------- événements
+
+  document.getElementById(`recherche`).addEventListener(`input`, function (ev) {
+    etat.recherche = ev.target.value || ``;
+    rendreVue();
+  });
+  document.getElementById(`btn-configurer`).addEventListener(`click`, function () {
+    etat.mode = `config`;
+    rendre();
+  });
+  document.getElementById(`btn-terminer`).addEventListener(`click`, function () {
+    etat.mode = `vue`;
+    rendre();
+  });
+  document.getElementById(`btn-deverrouiller`).addEventListener(`click`, function () {
+    etat.config.verrouille = false;
+    enregistrer();
+    etat.mode = `config`;
+    rendre();
+  });
+  document.getElementById(`emoji-recherche`).addEventListener(`input`, function (ev) {
+    remplirEmojis(ev.target.value || ``);
+  });
+  document.getElementById(`emoji-valider`).addEventListener(`click`, function () {
+    appliquerEmoji(document.getElementById(`emoji-libre`).value || ``);
+  });
+  document.getElementById(`emoji-vider`).addEventListener(`click`, function () { appliquerEmoji(``); });
+  document.getElementById(`emoji-fermer`).addEventListener(`click`, fermerEmoji);
+  document.getElementById(`echange-fermer`).addEventListener(`click`, function () {
+    document.getElementById(`fenetre-echange`).hidden = true;
+  });
+  document.getElementById(`echange-importer`).addEventListener(`click`, importerTexte);
+  document.getElementById(`echange-copier`).addEventListener(`click`, function () {
+    const zone = document.getElementById(`echange-texte`);
+    zone.focus();
+    zone.select();
+  });
+  document.addEventListener(`keydown`, function (ev) {
+    if (ev.key !== `Escape`) { return; }
+    fermerEmoji();
+    document.getElementById(`fenetre-echange`).hidden = true;
+  });
+
+  // -------------------------------------------------------- démarrage
+
+  function demarrerLocal(raison) {
+    if (etat.pret) { return; }
+    etat.pret = true;
+    etat.hote = `local`;
+    etat.config = chargerDepuisNavigateur();
+    if (raison) { signaler(`info`, raison); }
+    rendre();
+  }
+
+  function demarrerGrist() {
+    etat.hote = `grist`;
+    try {
+      grist.ready({
+        requiredAccess: `none`,
+        columns: [],
+      });
+    } catch (e) {
+      demarrerLocal(`L'API Grist n'a pas répondu. La configuration est conservée dans ce navigateur.`);
+      return;
+    }
+
+    try {
+      grist.onOptions(function (options) {
+        gristPret = true;
+        etat.optionsGristUtilisables = true;
+        etat.pret = true;
+        const brute = options && options.config ? options.config : null;
+        etat.config = normaliserConfig(brute);
+        rendre();
+      });
+    } catch (e) {
+      demarrerLocal(`Les réglages du widget ne sont pas accessibles. La configuration est conservée dans ce navigateur.`);
+      return;
+    }
+
+    // Si aucune réponse n'arrive, c'est que la page n'est pas dans Grist : on
+    // bascule sur l'enregistrement local plutôt que de rester vide.
+    setTimeout(function () {
+      if (!gristPret) {
+        demarrerLocal(`Aucun document Grist n'a répondu. La configuration est conservée dans ce navigateur.`);
+      }
+    }, DELAI_GRIST);
+  }
+
+  if (typeof window.grist === `object` && window.grist && typeof window.grist.ready === `function`) {
+    demarrerGrist();
+  } else {
+    demarrerLocal(null);
+  }
+  rendre();
+})();
+</script>
+</body>
+</html>
